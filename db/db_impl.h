@@ -156,6 +156,9 @@ class DBImpl : public DB {
       ColumnFamilyHandle* column_family,
       const std::unordered_map<std::string, std::string>& options_map) override;
 
+  virtual Status SetDBOptions(
+      const std::unordered_map<std::string, std::string>& options_map) override;
+
   using DB::NumberLevels;
   virtual int NumberLevels(ColumnFamilyHandle* column_family) override;
   using DB::MaxMemCompactionLevel;
@@ -360,6 +363,8 @@ class DBImpl : public DB {
   uint64_t TEST_FindMinLogContainingOutstandingPrep();
   uint64_t TEST_FindMinPrepLogReferencedByMemTable();
 
+  int TEST_BGCompactionsAllowed() const;
+
 #endif  // NDEBUG
 
   // Return maximum background compaction allowed to be scheduled based on
@@ -390,6 +395,10 @@ class DBImpl : public DB {
   ColumnFamilyHandle* DefaultColumnFamily() const override;
 
   const SnapshotList& snapshots() const { return snapshots_; }
+
+  const ImmutableDBOptions& immutable_db_options() const {
+    return immutable_db_options_;
+  }
 
   void CancelAllBackgroundWork(bool wait);
 
@@ -508,6 +517,7 @@ class DBImpl : public DB {
   Env* const env_;
   const std::string dbname_;
   unique_ptr<VersionSet> versions_;
+  const DBOptions initial_db_options_;
   const ImmutableDBOptions immutable_db_options_;
   MutableDBOptions mutable_db_options_;
   Statistics* stats_;
@@ -715,6 +725,10 @@ class DBImpl : public DB {
   void MarkLogsSynced(uint64_t up_to, bool synced_dir, const Status& status);
 
   const Snapshot* GetSnapshotImpl(bool is_write_conflict_boundary);
+
+  // Persist RocksDB options under the single write thread
+  // REQUIRES: mutex locked
+  Status PersistOptions();
 
   // table_cache_ provides its own synchronization
   std::shared_ptr<Cache> table_cache_;
@@ -979,10 +993,6 @@ class DBImpl : public DB {
 
   // The options to access storage files
   const EnvOptions env_options_;
-
-  // A set of compactions that are running right now
-  // REQUIRES: mutex held
-  std::unordered_set<Compaction*> running_compactions_;
 
   // Number of running AddFile() calls.
   // REQUIRES: mutex held

@@ -512,8 +512,7 @@ void DBIter::ReverseToForward() {
     IterKey last_key;
     last_key.SetInternalKey(ParsedInternalKey(
         saved_key_.GetKey(), kMaxSequenceNumber, kValueTypeForSeek));
-    Slice db_iter_key = last_key.GetKey();
-    iter_->ResetPrefixSeekKey(&db_iter_key);
+    iter_->Seek(last_key.GetKey());
   }
   FindNextUserKey();
   direction_ = kForward;
@@ -527,8 +526,7 @@ void DBIter::ReverseToBackward() {
     IterKey last_key;
     last_key.SetInternalKey(
         ParsedInternalKey(saved_key_.GetKey(), 0, kValueTypeForSeekForPrev));
-    Slice db_iter_key = last_key.GetKey();
-    iter_->ResetPrefixSeekKey(&db_iter_key);
+    iter_->SeekForPrev(last_key.GetKey());
   }
   if (current_entry_is_merged_) {
     // Not placed in the same key. Need to call Prev() until finding the
@@ -660,7 +658,8 @@ bool DBIter::FindValueForCurrentKey() {
       return false;
     case kTypeMerge:
       current_entry_is_merged_ = true;
-      if (last_not_merge_type == kTypeDeletion) {
+      if (last_not_merge_type == kTypeDeletion ||
+          last_not_merge_type == kTypeSingleDeletion) {
         MergeHelper::TimedFullMerge(merge_operator_, saved_key_.GetKey(),
                                     nullptr, merge_context_.GetOperands(),
                                     &saved_value_, logger_, statistics_, env_,

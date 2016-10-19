@@ -71,6 +71,8 @@ inline bool IsExtendedValueType(ValueType t) {
 static const SequenceNumber kMaxSequenceNumber =
     ((0x1ull << 56) - 1);
 
+static const SequenceNumber kDisableGlobalSequenceNumber = port::kMaxUint64;
+
 struct ParsedInternalKey {
   Slice user_key;
   SequenceNumber sequence;
@@ -357,6 +359,15 @@ class IterKey {
     return Slice(key_, key_n);
   }
 
+  // Copy the key into IterKey own buf_
+  void OwnKey() {
+    assert(IsKeyPinned() == true);
+
+    Reserve(key_size_);
+    memcpy(buf_, key_, key_size_);
+    key_ = buf_;
+  }
+
   // Update the sequence number in the internal key.  Guarantees not to
   // invalidate slices to the key (and the user key).
   void UpdateInternalKey(uint64_t seq, ValueType t) {
@@ -507,22 +518,29 @@ struct RangeTombstone {
 
   explicit RangeTombstone(Slice internal_key, Slice value) {
     ParsedInternalKey parsed_key;
-    if (ParseInternalKey(internal_key, &parsed_key)) {
-      start_key_ = parsed_key.user_key;
-      seq_ = parsed_key.sequence;
-      end_key_ = value;
+    if (!ParseInternalKey(internal_key, &parsed_key)) {
+      assert(false);
     }
+    start_key_ = parsed_key.user_key;
+    seq_ = parsed_key.sequence;
+    end_key_ = value;
   }
 
-  // be careful to use Serialize(); InternalKey() allocates new memory
-  std::pair<InternalKey, Slice> Serialize() {
+  // be careful to use Serialize(), allocates new memory
+  std::pair<InternalKey, Slice> Serialize() const {
     auto key = InternalKey(start_key_, seq_, kTypeRangeDeletion);
     Slice value = end_key_;
     return std::make_pair(std::move(key), std::move(value));
   }
 
-  InternalKey SerializeKey() {
+  // be careful to use SerializeKey(), allocates new memory
+  InternalKey SerializeKey() const {
     return InternalKey(start_key_, seq_, kTypeRangeDeletion);
+  }
+
+  // be careful to use SerializeEndKey(), allocates new memory
+  InternalKey SerializeEndKey() const {
+    return InternalKey(end_key_, seq_, kTypeRangeDeletion);
   }
 };
 

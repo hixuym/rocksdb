@@ -382,6 +382,42 @@ TEST_F(DBWALTest, PreallocateBlock) {
 #endif  // !(defined NDEBUG) || !defined(OS_WIN)
 
 #ifndef ROCKSDB_LITE
+TEST_F(DBWALTest, FullPurgePreservesRecycledLog) {
+  // For github issue #1303
+  for (int i = 0; i < 2; ++i) {
+    Options options = CurrentOptions();
+    options.create_if_missing = true;
+    options.recycle_log_file_num = 2;
+    if (i != 0) {
+      options.wal_dir = alternative_wal_dir_;
+    }
+
+    DestroyAndReopen(options);
+    ASSERT_OK(Put("foo", "v1"));
+    VectorLogPtr log_files;
+    ASSERT_OK(dbfull()->GetSortedWalFiles(log_files));
+    ASSERT_GT(log_files.size(), 0);
+    ASSERT_OK(Flush());
+
+    // Now the original WAL is in log_files[0] and should be marked for
+    // recycling.
+    // Verify full purge cannot remove this file.
+    JobContext job_context(0);
+    dbfull()->TEST_LockMutex();
+    dbfull()->FindObsoleteFiles(&job_context, true /* force */);
+    dbfull()->TEST_UnlockMutex();
+    dbfull()->PurgeObsoleteFiles(job_context);
+
+    if (i == 0) {
+      ASSERT_OK(
+          env_->FileExists(LogFileName(dbname_, log_files[0]->LogNumber())));
+    } else {
+      ASSERT_OK(env_->FileExists(
+          LogFileName(alternative_wal_dir_, log_files[0]->LogNumber())));
+    }
+  }
+}
+
 TEST_F(DBWALTest, GetSortedWalFiles) {
   do {
     CreateAndReopenWithCF({"pikachu"}, CurrentOptions());
@@ -968,6 +1004,32 @@ TEST_F(DBWALTest, AvoidFlushDuringRecovery) {
   ASSERT_EQ("v11", Get("foo"));
   ASSERT_EQ("v12", Get("bar"));
   ASSERT_EQ(2, TotalTableFiles());
+}
+
+TEST_F(DBWALTest, WalCleanupAfterAvoidFlushDuringRecovery) {
+  // Verifies WAL files that were present during recovery, but not flushed due
+  // to avoid_flush_during_recovery, will be considered for deletion at a later
+  // stage. We check at least one such file is deleted during Flush().
+  Options options = CurrentOptions();
+  options.disable_auto_compactions = true;
+  options.avoid_flush_during_recovery = true;
+  Reopen(options);
+
+  ASSERT_OK(Put("foo", "v1"));
+  Reopen(options);
+  for (int i = 0; i < 2; ++i) {
+    if (i > 0) {
+      // Flush() triggers deletion of obsolete tracked files
+      Flush();
+    }
+    VectorLogPtr log_files;
+    ASSERT_OK(dbfull()->GetSortedWalFiles(log_files));
+    if (i == 0) {
+      ASSERT_GT(log_files.size(), 0);
+    } else {
+      ASSERT_EQ(0, log_files.size());
+    }
+  }
 }
 
 TEST_F(DBWALTest, RecoverWithoutFlush) {

@@ -11,10 +11,12 @@
 
 #include <inttypes.h>
 
-#include "db/builder.h"
 #include "rocksdb/db.h"
 #include "rocksdb/env.h"
 #include "rocksdb/sst_file_writer.h"
+
+#include "db/builder.h"
+#include "table/sst_file_writer_collectors.h"
 #include "table/table_builder.h"
 #include "util/file_reader_writer.h"
 #include "util/file_util.h"
@@ -67,7 +69,12 @@ Status DBImpl::ReadExternalSstFileInfo(ColumnFamilyHandle* column_family,
 
   file_info->version =
       DecodeFixed32(external_sst_file_version_iter->second.c_str());
-  if (file_info->version == 1) {
+  if (file_info->version == 2) {
+    // version 2 imply that we have global sequence number
+
+    // TODO(tec): Implement version 2 ingestion
+    file_info->sequence_number = 0;
+  } else if (file_info->version == 1) {
     // version 1 imply that all sequence numbers in table equal 0
     file_info->sequence_number = 0;
   } else {
@@ -165,12 +172,20 @@ Status DBImpl::AddFile(ColumnFamilyHandle* column_family,
     if (file_info_list[i].num_entries == 0) {
       return Status::InvalidArgument("File contain no entries");
     }
-    if (file_info_list[i].version != 1) {
+
+    if (file_info_list[i].version == 2) {
+      // version 2 imply that file have only Put Operations
+      // with global Sequence Number
+
+      // TODO(tec): Implement changing file global sequence number
+    } else if (file_info_list[i].version == 1) {
+      // version 1 imply that file have only Put Operations
+      // with Sequence Number = 0
+    } else {
+      // Unknown version !
       return Status::InvalidArgument(
           "Generated table version is not supported");
     }
-    // version 1 imply that file have only Put Operations with Sequence Number =
-    // 0
 
     meta_list[i].smallest =
         InternalKey(file_info_list[i].smallest_key,
@@ -264,7 +279,7 @@ Status DBImpl::AddFile(ColumnFamilyHandle* column_family,
       for (size_t i = 0; i < num_files; i++) {
         StopWatch sw(env_, nullptr, 0, &micro_list[i], false);
         InternalKey range_start(file_info_list[i].smallest_key,
-                                kMaxSequenceNumber, kTypeValue);
+                                kMaxSequenceNumber, kValueTypeForSeek);
         iter->Seek(range_start.Encode());
         status = iter->status();
 
@@ -324,6 +339,10 @@ Status DBImpl::AddFile(ColumnFamilyHandle* column_family,
         if (target_level_list[i] == 0) {
           total_l0_files += 1;
         }
+        Log(InfoLogLevel::INFO_LEVEL, immutable_db_options_.info_log,
+            "[AddFile] External SST file %s was ingested in L%d with path %s\n",
+            file_info_list[i].file_path.c_str(), target_level_list[i],
+            db_fname_list[i].c_str());
       }
       cfd->internal_stats()->AddCFStats(InternalStats::INGESTED_NUM_KEYS_TOTAL,
                                         total_keys);
@@ -378,45 +397,22 @@ int DBImpl::PickLevelForIngestedFile(ColumnFamilyData* cfd,
 
   int target_level = 0;
   auto* vstorage = cfd->current()->storage_info();
-  auto* ucmp = vstorage->InternalComparator()->user_comparator();
-
   Slice file_smallest_user_key(file_info.smallest_key);
   Slice file_largest_user_key(file_info.largest_key);
 
   for (int lvl = cfd->NumberLevels() - 1; lvl >= vstorage->base_level();
        lvl--) {
+    // Make sure that the file fits in Level `lvl` and dont overlap with
+    // the output of any compaction running right now.
     if (vstorage->OverlapInLevel(lvl, &file_smallest_user_key,
-                                 &file_largest_user_key) == false) {
-      // Make sure that the file dont overlap with the output of any
-      // compaction running right now
-      Slice compaction_smallest_user_key;
-      Slice compaction_largest_user_key;
-      bool overlap_with_compaction_output = false;
-      for (Compaction* c : running_compactions_) {
-        if (c->column_family_data()->GetID() != cfd->GetID() ||
-            c->output_level() != lvl) {
-          continue;
-        }
-
-        compaction_smallest_user_key = c->GetSmallestUserKey();
-        compaction_largest_user_key = c->GetLargestUserKey();
-
-        if (ucmp->Compare(file_smallest_user_key,
-                          compaction_largest_user_key) <= 0 &&
-            ucmp->Compare(file_largest_user_key,
-                          compaction_smallest_user_key) >= 0) {
-          overlap_with_compaction_output = true;
-          break;
-        }
-      }
-
-      if (overlap_with_compaction_output == false) {
-        // Level lvl is the lowest level that dont have any files with key
-        // range overlapping with our file key range and no compactions
-        // planning to add overlapping files in it.
-        target_level = lvl;
-        break;
-      }
+                                 &file_largest_user_key) == false &&
+        cfd->RangeOverlapWithCompaction(file_smallest_user_key,
+                                        file_largest_user_key, lvl) == false) {
+      // Level lvl is the lowest level that dont have any files with key
+      // range overlapping with our file key range and no compactions
+      // planning to add overlapping files in it.
+      target_level = lvl;
+      break;
     }
   }
 

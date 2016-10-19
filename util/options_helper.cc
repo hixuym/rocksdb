@@ -26,6 +26,8 @@
 
 namespace rocksdb {
 
+const std::string kNullptrString = "nullptr";
+
 DBOptions BuildDBOptions(const ImmutableDBOptions& immutable_db_options,
                          const MutableDBOptions& mutable_db_options) {
   DBOptions options;
@@ -53,9 +55,9 @@ DBOptions BuildDBOptions(const ImmutableDBOptions& immutable_db_options,
   options.delete_obsolete_files_period_micros =
       immutable_db_options.delete_obsolete_files_period_micros;
   options.base_background_compactions =
-      immutable_db_options.base_background_compactions;
+      mutable_db_options.base_background_compactions;
   options.max_background_compactions =
-      immutable_db_options.max_background_compactions;
+      mutable_db_options.max_background_compactions;
   options.max_subcompactions = immutable_db_options.max_subcompactions;
   options.max_background_flushes = immutable_db_options.max_background_flushes;
   options.max_log_file_size = immutable_db_options.max_log_file_size;
@@ -451,7 +453,7 @@ bool ParseSliceTransformHelper(
     const std::string& kFixedPrefixName, const std::string& kCappedPrefixName,
     const std::string& value,
     std::shared_ptr<const SliceTransform>* slice_transform) {
-  static const std::string kNullptrString = "nullptr";
+
   auto& pe_value = value;
   if (pe_value.size() > kFixedPrefixName.size() &&
       pe_value.compare(0, kFixedPrefixName.size(), kFixedPrefixName) == 0) {
@@ -577,7 +579,7 @@ bool ParseOptionHelper(char* opt_address, const OptionType& opt_type,
 bool SerializeSingleOptionHelper(const char* opt_address,
                                  const OptionType opt_type,
                                  std::string* value) {
-  static const std::string kNullptrString = "nullptr";
+
   assert(value);
   switch (opt_type) {
     case OptionType::kBoolean:
@@ -734,6 +736,36 @@ Status GetMutableOptionsFromStrings(
     try {
       auto iter = cf_options_type_info.find(o.first);
       if (iter == cf_options_type_info.end()) {
+        return Status::InvalidArgument("Unrecognized option: " + o.first);
+      }
+      const auto& opt_info = iter->second;
+      if (!opt_info.is_mutable) {
+        return Status::InvalidArgument("Option not changeable: " + o.first);
+      }
+      bool is_ok = ParseOptionHelper(
+          reinterpret_cast<char*>(new_options) + opt_info.mutable_offset,
+          opt_info.type, o.second);
+      if (!is_ok) {
+        return Status::InvalidArgument("Error parsing " + o.first);
+      }
+    } catch (std::exception& e) {
+      return Status::InvalidArgument("Error parsing " + o.first + ":" +
+                                     std::string(e.what()));
+    }
+  }
+  return Status::OK();
+}
+
+Status GetMutableDBOptionsFromStrings(
+    const MutableDBOptions& base_options,
+    const std::unordered_map<std::string, std::string>& options_map,
+    MutableDBOptions* new_options) {
+  assert(new_options);
+  *new_options = base_options;
+  for (const auto& o : options_map) {
+    try {
+      auto iter = db_options_type_info.find(o.first);
+      if (iter == db_options_type_info.end()) {
         return Status::InvalidArgument("Unrecognized option: " + o.first);
       }
       const auto& opt_info = iter->second;
